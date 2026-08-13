@@ -1,0 +1,29 @@
+# --- Secrets (NEVER commit these) ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+
+# --- Generated / runtime artifacts ---
+chat_logs/
+reports/
+data/
+*.log
+
+# --- IDE ---
+.vscode/
+.idea/
+
+# --- Misc ---
+.DS_Store
+*.md.swp
