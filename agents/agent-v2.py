@@ -31,7 +31,8 @@ from langgraph.store.memory import InMemoryStore
 load_dotenv()
 
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
-LOG_DIR = "./chat_logs"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(PROJECT_ROOT, "chat_logs")
 EXIT_COMMANDS = {"exit", "quit", "退出"}
 
 
@@ -93,7 +94,7 @@ def simple_search(query: str, max_results: int = 1):
     """运行简单搜索，返回 Tavily 检索结果（带缓存）。"""
     return _cached_tavily_search(query, max_results, "general", False)
 
-DEFAULT_REPORT_DIR = os.path.join(os.path.dirname(__file__), "reports")
+DEFAULT_REPORT_DIR = os.path.join(PROJECT_ROOT, "reports")
 
 
 def save_report_to_md(report: str, filename: str) -> str:

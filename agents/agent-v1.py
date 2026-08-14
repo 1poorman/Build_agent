@@ -113,8 +113,9 @@ if __name__ == "__main__":
     # 为本次运行创建一个唯一的会话 ID
     session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # 准备对话日志目录和文件
-    log_dir = "./chat_logs"
+    # 准备对话日志目录和文件（基于项目根目录，保证从任意位置运行都正确）
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_dir = os.path.join(project_root, "chat_logs")
     os.makedirs(log_dir, exist_ok=True)
     log_filename = os.path.join(log_dir, f"dialogue_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
     

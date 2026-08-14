@@ -36,17 +36,23 @@
 
 ```
 langchain/
-├── agent-v1.py            # 研究助手 v1：create_react_agent + Tavily 搜索 + MemorySaver
-├── agent-v2.py            # 研究助手 v2：deepagents 多子代理 + 流式工具调用可视化 + 保存确认
-├── agent_rag.py           # RAG 文档问答：向量检索 + PostgreSQL Checkpoint 持久化
-├── agent_route.py         # 多源知识路由：LangGraph StateGraph + Send 并行分发
-├── agent_sql_skill.py     # SQL 助手：Skill Middleware 渐进式技能注入
-├── agent_data_analysis.py # 数据分析：文件系统后端 + Slack 消息推送
-├── meteor.py              # 天气查询工具（wttr.in）示例
-├── temp.py                # 天气查询工具（Open-Meteo）示例
-├── temp_deepagent.py      # deepagents + Tavily 最小示例
-├── test_langgraph.py      # LangGraph 最小可运行示例
-├── .env.example           # 环境变量模板（复制为 .env 使用）
+├── agents/                    # 核心 Agent 脚本
+│   ├── agent-v1.py            # 研究助手 v1：create_react_agent + Tavily 搜索 + MemorySaver
+│   ├── agent-v2.py            # 研究助手 v2：deepagents 多子代理 + 流式工具调用可视化 + 保存确认
+│   ├── agent_rag.py           # RAG 文档问答：向量检索 + PostgreSQL Checkpoint 持久化
+│   ├── agent_route.py         # 多源知识路由：LangGraph StateGraph + Send 并行分发
+│   ├── agent_sql_skill.py     # SQL 助手：Skill Middleware 渐进式技能注入
+│   └── agent_data_analysis.py # 数据分析：文件系统后端 + Slack 消息推送
+├── examples/                  # 入门与实验示例
+│   ├── langgraph_minimal.py   # LangGraph 最小可运行示例
+│   ├── deepagents_minimal.py  # deepagents + Tavily 最小示例
+│   ├── weather_meteor.py      # 天气查询工具（wttr.in）示例
+│   └── weather_openmeteo.py   # 天气查询工具（Open-Meteo）示例
+├── data/                      # 输入数据（如 CSV）
+├── reports/                   # 生成的报告输出（自动创建）
+├── chat_logs/                 # 对话日志输出（自动创建）
+├── .env.example               # 环境变量模板（复制为 .env 使用）
+├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
@@ -108,19 +114,22 @@ LANGSMITH_API_KEY=""
 
 ```bash
 # RAG 文档问答（需先启动 PostgreSQL）
-python -m agent_rag
+python agents/agent_rag.py
 
 # 研究助手 v1（联网搜索 + 连续对话）
-python agent-v1.py
+python agents/agent-v1.py
 
 # 研究助手 v2（多子代理，推荐）
-python agent-v2.py
+python agents/agent-v2.py
 
 # SQL 技能助手
-python agent_sql_skill.py
+python agents/agent_sql_skill.py
 
 # 多源知识路由示例
-python agent_route.py
+python agents/agent_route.py
+
+# 最小示例
+python examples/langgraph_minimal.py
 ```
 
 ---

@@ -173,7 +173,8 @@ model = ChatOpenAI(
     max_retries=1,
 )
 
-REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 

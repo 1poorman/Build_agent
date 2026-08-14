@@ -14,7 +14,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 load_dotenv()
 
 # Use local filesystem backend instead of LangSmith Sandbox
-backend = FilesystemBackend(root_dir="/home/huachenghao/codes/langchain", virtual_mode=True)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+backend = FilesystemBackend(root_dir=PROJECT_ROOT, virtual_mode=True)
 
 
 
