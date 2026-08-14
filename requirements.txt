@@ -1,0 +1,18 @@
+# Core
+langchain>=0.3
+langchain-core>=0.3
+langchain-openai>=0.2
+langchain-text-splitters>=0.3
+langgraph>=1.0
+langgraph-checkpoint>=4.0
+langgraph-checkpoint-postgres>=3.0
+deepagents>=0.6
+
+# Tools & utils
+tavily-python>=0.5
+python-dotenv>=1.0
+requests>=2.31
+psycopg2-binary>=2.9
+
+# Optional
+slack-sdk>=3.0
