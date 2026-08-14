@@ -42,7 +42,8 @@ langchain/
 │   ├── agent_rag.py           # RAG 文档问答：向量检索 + PostgreSQL Checkpoint 持久化
 │   ├── agent_route.py         # 多源知识路由：LangGraph StateGraph + Send 并行分发
 │   ├── agent_sql_skill.py     # SQL 助手：Skill Middleware 渐进式技能注入
-│   └── agent_data_analysis.py # 数据分析：文件系统后端 + Slack 消息推送
+│   ├── agent_data_analysis.py # 数据分析：文件系统后端 + Slack 消息推送
+│   └── contract_review_agent.py # 合同审查自动化：调用 agent-helper API 编排审查流水线
 ├── examples/                  # 入门与实验示例
 │   ├── langgraph_minimal.py   # LangGraph 最小可运行示例
 │   ├── deepagents_minimal.py  # deepagents + Tavily 最小示例
@@ -70,8 +71,8 @@ langchain/
 ### 2. 安装依赖
 
 ```bash
-conda create -n langchain python=3.11 -y
-conda activate langchain
+conda create -n agent python=3.11 -y
+conda activate agent
 
 pip install -r requirements.txt
 # 或按需安装：
@@ -130,6 +131,9 @@ python agents/agent_route.py
 
 # 最小示例
 python examples/langgraph_minimal.py
+
+# 合同审查自动化（需先部署 agent-helper 服务）
+python agents/contract_review_agent.py /path/to/contract.pdf [文件ID]
 ```
 
 ---
@@ -141,6 +145,13 @@ python examples/langgraph_minimal.py
 - **流程**：在线抓取 LangChain 官方文档 → `RecursiveCharacterTextSplitter` 切分 → `bge-m3` 向量化 → `InMemoryVectorStore` 检索 → deepagents 子代理分析 → 综合回答
 - **持久化**：使用 LangGraph 原生 **PostgreSQL Checkpoint**（`PostgresSaver`），整个图状态落库，重启后通过 `thread_id` 恢复对话
 - **交互**：支持将回答保存为 Markdown（保存前用户确认）
+
+### `contract_review_agent.py` — 合同审查自动化 Agent
+
+- **流程**：LangGraph 编排 6 步流水线 —— 文档解析（MinerU）→ 要素抽取 → 一致性核查 → 金额核查 → 印章/签名检测 → 汇总报告
+- **后端**：通过 HTTP 调用 `agent-helper` 服务（`/api/mineru/textExtractDir`、`/api/agent/extractEntity`、`/api/agent/complianceAudit`、`/api/Contract/verifyContractAmount`、`/api/Contract/checkSignaturewithSeal`、`/api/detection/detectSeal`）
+- **输出**：Markdown 审查报告（`reports/contract_review_*.md`）
+- **配置**：服务地址通过环境变量 `AGENT_HELPER_BASE_URL` 指定（默认 `http://172.25.67.120:8018`）
 
 ### `agent-v2.py` — 多子代理研究助手
 
