@@ -14,6 +14,8 @@
 - 🧩 **多子代理协作**：任务路由、并行检索、结果综合
 - 🗄️ **SQL 技能增强**：通过 Middleware 渐进式揭示领域技能
 - 📊 **数据分析**：本地文件系统后端 + 外部平台消息推送
+- ⚖️ **合同审查自动化**：调用 agent-helper API 编排审查流水线
+- 🤖 **API 调度 Agent**：LLM 根据问题自动路由调用文档审查 API，连续对话 + 持久化记忆
 
 每个脚本均可独立运行，作为学习与二次开发的参考模板。
 
@@ -29,6 +31,7 @@
 | **RAG 检索增强** | 在线抓取文档 → 切分 → Embedding → 向量检索 |
 | **PostgreSQL 持久化** | 原生 LangGraph Checkpoint 落库，重启不丢上下文 |
 | **用户确认机制** | 保存文件前中断等待用户确认（`interrupt` / `Command`） |
+| **智能 API 路由** | LLM 自动选择并调用文档审查 API，无需预编排流程 |
 
 ---
 
@@ -42,8 +45,9 @@ langchain/
 │   ├── agent_rag.py           # RAG 文档问答：向量检索 + PostgreSQL Checkpoint 持久化
 │   ├── agent_route.py         # 多源知识路由：LangGraph StateGraph + Send 并行分发
 │   ├── agent_sql_skill.py     # SQL 助手：Skill Middleware 渐进式技能注入
-│   ├── agent_data_analysis.py # 数据分析：文件系统后端 + Slack 消息推送
-│   └── contract_review_agent.py # 合同审查自动化：调用 agent-helper API 编排审查流水线
+│   ├── agent_data_analysis.py   # 数据分析：文件系统后端 + Slack 消息推送
+│   ├── contract_review_agent.py # 合同审查自动化：调用 agent-helper API 编排审查流水线
+│   └── api_dispatch_agent.py    # API 调度 Agent：LLM 自动路由调用文档审查 API + 记忆持久化
 ├── examples/                  # 入门与实验示例
 │   ├── langgraph_minimal.py   # LangGraph 最小可运行示例
 │   ├── deepagents_minimal.py  # deepagents + Tavily 最小示例
@@ -65,7 +69,8 @@ langchain/
 ### 1. 环境要求
 
 - Python 3.10+
-- PostgreSQL 14+（仅 `agent_rag.py` 需要）
+- PostgreSQL 14+（`agent_rag.py` / `api_dispatch_agent.py` 需要）
+- agent-helper 服务（`contract_review_agent.py` / `api_dispatch_agent.py` 需要）
 - 兼容 OpenAI 协议的 LLM 服务（OpenAI / DeepSeek / Qwen 等）
 
 ### 2. 安装依赖
@@ -134,6 +139,10 @@ python examples/langgraph_minimal.py
 
 # 合同审查自动化（需先部署 agent-helper 服务）
 python agents/contract_review_agent.py /path/to/contract.pdf [文件ID]
+
+# API 调度 Agent（LLM 自动路由调用文档审查 API，连续对话）
+python agents/api_dispatch_agent.py                      # 默认会话
+python agents/api_dispatch_agent.py --thread my-session  # 指定会话
 ```
 
 ---
@@ -152,6 +161,13 @@ python agents/contract_review_agent.py /path/to/contract.pdf [文件ID]
 - **后端**：通过 HTTP 调用 `agent-helper` 服务（`/api/mineru/textExtractDir`、`/api/agent/extractEntity`、`/api/agent/complianceAudit`、`/api/Contract/verifyContractAmount`、`/api/Contract/checkSignaturewithSeal`、`/api/detection/detectSeal`）
 - **输出**：Markdown 审查报告（`reports/contract_review_*.md`）
 - **配置**：服务地址通过环境变量 `AGENT_HELPER_BASE_URL` 指定（默认 `http://172.25.67.120:8018`）
+
+### `api_dispatch_agent.py` — API 调度 Agent
+
+- **核心**：LLM 根据用户问题**自动选择并调用**合适的文档审查 API，无需预编排固定流程
+- **工具**：8 个 `@tool` 封装（全文提取、实体抽取、合规审查、金额核查、签章检测、印章检测、空白页、目录检测），对应 agent-helper 各接口
+- **记忆**：`PostgresSaver` Checkpoint 持久化连续对话，重启后凭 `thread_id` 恢复完整上下文
+- **交互**：CLI 连续对话，支持多轮追问（如"刚才那个文档的签章情况？"）
 
 ### `agent-v2.py` — 多子代理研究助手
 
