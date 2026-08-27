@@ -160,7 +160,7 @@ python agents/api_dispatch_agent.py --thread my-session  # 指定会话
 - **流程**：LangGraph 编排 6 步流水线 —— 文档解析（MinerU）→ 要素抽取 → 一致性核查 → 金额核查 → 印章/签名检测 → 汇总报告
 - **后端**：通过 HTTP 调用 `agent-helper` 服务（`/api/mineru/textExtractDir`、`/api/agent/extractEntity`、`/api/agent/complianceAudit`、`/api/Contract/verifyContractAmount`、`/api/Contract/checkSignaturewithSeal`、`/api/detection/detectSeal`）
 - **输出**：Markdown 审查报告（`reports/contract_review_*.md`）
-- **配置**：服务地址通过环境变量 `AGENT_HELPER_BASE_URL` 指定（默认 `http://172.25.67.120:8018`）
+- **配置**：服务地址通过环境变量 `AGENT_HELPER_BASE_URL` 指定（默认 `http://172.25.67.120:8359`）
 
 ### `api_dispatch_agent.py` — API 调度 Agent
 
