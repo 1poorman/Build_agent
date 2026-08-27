@@ -18,6 +18,7 @@ ENV/
 chat_logs/
 reports/
 data/
+traces/
 *.log
 
 # --- IDE ---
