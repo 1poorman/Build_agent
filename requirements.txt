@@ -14,5 +14,8 @@ python-dotenv>=1.0
 requests>=2.31
 psycopg2-binary>=2.9
 
+# MCP（agent-v2.py 的 USE_TAVILY_MCP=1 模式需要）
+langchain-mcp-adapters>=0.3.2
+
 # Optional
 slack-sdk>=3.0

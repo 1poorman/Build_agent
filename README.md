@@ -32,6 +32,8 @@
 | **PostgreSQL 持久化** | 原生 LangGraph Checkpoint 落库，重启不丢上下文 |
 | **用户确认机制** | 保存文件前中断等待用户确认（`interrupt` / `Command`） |
 | **智能 API 路由** | LLM 自动选择并调用文档审查 API，无需预编排流程 |
+| **MCP 工具接入** | 通过 MCP 协议加载远程工具（Tavily），失败自动回退直连 SDK |
+| **运行追踪** | 记录工具调用的入参格式、HTTP 请求/响应与耗时（按需开关） |
 
 ---
 
@@ -41,12 +43,13 @@
 langchain/
 ├── agents/                    # 核心 Agent 脚本
 │   ├── agent-v1.py            # 研究助手 v1：create_react_agent + Tavily 搜索 + MemorySaver
-│   ├── agent-v2.py            # 研究助手 v2：deepagents 多子代理 + 流式工具调用可视化 + 保存确认
+│   ├── agent-v2.py            # 研究助手 v2：deepagents 多子代理 + 流式工具调用可视化 + 保存确认 + SDK/MCP 双搜索后端
 │   ├── agent_rag.py           # RAG 文档问答：向量检索 + PostgreSQL Checkpoint 持久化
 │   ├── agent_route.py         # 多源知识路由：LangGraph StateGraph + Send 并行分发
 │   ├── agent_sql_skill.py     # SQL 助手：Skill Middleware 渐进式技能注入
 │   ├── agent_data_analysis.py   # 数据分析：文件系统后端 + Slack 消息推送
 │   ├── contract_review_agent.py # 合同审查自动化：调用 agent-helper API 编排审查流水线
+│   ├── mff_early_warning_agent.py # 中频炉预警：LLM 自动调用预警智能体 API + 运行追踪
 │   └── api_dispatch_agent.py    # API 调度 Agent：LLM 自动路由调用文档审查 API + 记忆持久化
 ├── examples/                  # 入门与实验示例
 │   ├── langgraph_minimal.py   # LangGraph 最小可运行示例
@@ -84,6 +87,7 @@ pip install -r requirements.txt
 pip install langchain langgraph deepagents langchain-openai langchain-text-splitters
 pip install tavily-python python-dotenv psycopg2-binary
 pip install langgraph-checkpoint-postgres   # RAG Agent Postgres 持久化
+pip install langchain-mcp-adapters          # agent-v2.py 的 MCP 搜索模式（可选）
 ```
 
 ### 3. 配置环境变量
@@ -126,7 +130,8 @@ python agents/agent_rag.py
 python agents/agent-v1.py
 
 # 研究助手 v2（多子代理，推荐）
-python agents/agent-v2.py
+python agents/agent-v2.py                   # SDK 搜索后端（默认，带缓存）
+USE_TAVILY_MCP=1 python agents/agent-v2.py  # MCP 搜索后端（需 langchain-mcp-adapters）
 
 # SQL 技能助手
 python agents/agent_sql_skill.py
@@ -143,6 +148,10 @@ python agents/contract_review_agent.py /path/to/contract.pdf [文件ID]
 # API 调度 Agent（LLM 自动路由调用文档审查 API，连续对话）
 python agents/api_dispatch_agent.py                      # 默认会话
 python agents/api_dispatch_agent.py --thread my-session  # 指定会话
+
+# 中频炉预警 Agent
+python agents/mff_early_warning_agent.py                 # 默认会话
+python agents/mff_early_warning_agent.py --trace         # 开启运行追踪
 ```
 
 ---
@@ -169,11 +178,57 @@ python agents/api_dispatch_agent.py --thread my-session  # 指定会话
 - **记忆**：`PostgresSaver` Checkpoint 持久化连续对话，重启后凭 `thread_id` 恢复完整上下文
 - **交互**：CLI 连续对话，支持多轮追问（如"刚才那个文档的签章情况？"）
 
+### `mff_early_warning_agent.py` — 中频炉预警 Agent
+
+- **核心**：LLM 根据用户问题自动调用中频炉预警智能体的 12 个 API（数据采集 / 多级预警分析 L1-L3 / 根因诊断 / 工单处置 / 知识库优化）
+- **持久化**：`PostgresSaver` Checkpoint，重启后凭 `thread_id` 恢复对话
+- **运行追踪**（可选）：记录每次工具调用的入参及数据格式、底层 HTTP 请求/响应与耗时，落盘 `traces/*.json`
+  - 默认**关闭**，通过 `MFF_TRACE=1` 环境变量或 `--trace` 参数开启
+
 ### `agent-v2.py` — 多子代理研究助手
 
 - **架构**：主 Agent + `research-agent`（深入调研）+ `simple-search`（简单问答）两个子代理
 - **记忆**：`MemorySaver`（短期）+ `InMemoryStore`（长期）双通道
 - **特性**：流式显示工具调用与子代理委派、`interrupt` 实现保存前用户确认、对话自动落盘 `chat_logs/`
+
+#### 搜索后端：SDK / MCP 双模式
+
+由环境变量 `USE_TAVILY_MCP` 切换（默认 `0`，即 SDK 模式）：
+
+```bash
+python agents/agent-v2.py                          # SDK 模式（默认，带 lru_cache 缓存）
+USE_TAVILY_MCP=1 python agents/agent-v2.py         # MCP 模式
+```
+
+| | SDK 模式（默认） | MCP 模式 |
+|---|---|---|
+| 依赖 | `tavily-python` | `langchain-mcp-adapters` |
+| 调用方式 | 直连 Tavily HTTP API | MCP 协议连远程服务器 `https://mcp.tavily.com/mcp/` |
+| 本地缓存 | ✅ `lru_cache`，相同查询免网络往返 | ❌ 每次真实网络调用 |
+| 工具 | `internet_search` / `quick_fact_check` | `tavily_search` / `tavily_extract` / `tavily_crawl` / `tavily_map` / `tavily_research` |
+
+> MCP 工具在**客户端**转换为普通 LangChain 工具，因此不要求模型服务端支持 MCP，
+> 只要支持 function calling 即可（兼容 SiliconFlow、Qwen 等 OpenAI 兼容接口）。
+> MCP 连接失败或未返回工具时**自动回退 SDK 模式**，保证 Agent 始终可用。
+
+#### 工具区分度设计
+
+两个搜索工具语义相近，为避免误调用，从三层做了区分：
+
+| 层次 | `internet_search` | `quick_fact_check` |
+|---|---|---|
+| 工具定位 | 深度检索：多来源、领域筛选、可要原文 | 事实核查：单来源、轻量 |
+| 参数 | `max_results` 1-10（默认 3）、`topic`、`include_raw_content` | `max_results` 1-3（默认 1） |
+| 子代理 | `research-agent` | `simple-search` |
+
+- 两个 schema 的描述中**互相点名对方**，模型选错时可自我纠正
+- 子代理 `description` 用 `【委派条件】/【不要委派】` 结构，主代理按「答案是否需要多来源交叉验证」分流
+- MCP 模式下两个子代理拿到的是同名同描述工具，故在包装时注入 `【调研场景】`/`【事实核查场景】` 描述前缀
+
+#### 防循环约束
+
+- 事实核查子代理：最多调用 2 次工具
+- 主代理：每个问题最多委派 2 次子代理；子代理回复「未能核实」时如实转告用户，不换子代理重试
 
 ### `agent_route.py` — 多源知识路由
 
@@ -226,7 +281,8 @@ PGPASSWORD=postgres psql -h localhost -U postgres -d langchain_memory \
 | [LangChain](https://github.com/langchain-ai/langchain) | Agent 构建、工具、LLM 封装 |
 | [LangGraph](https://github.com/langchain-ai/langgraph) | 图状态编排、Checkpoint 持久化 |
 | [deepagents](https://github.com/langchain-ai/deepagents) | 深度 Agent（子代理、文件系统后端） |
-| [Tavily](https://tavily.com) | 联网搜索 API |
+| [Tavily](https://tavily.com) | 联网搜索 API（支持 SDK 直连与远程 MCP 两种接入） |
+| [MCP](https://modelcontextprotocol.io) | 模型上下文协议，远程工具接入（`langchain-mcp-adapters`） |
 | [PostgreSQL](https://www.postgresql.org/) | Checkpoint 持久化存储 |
 
 ---

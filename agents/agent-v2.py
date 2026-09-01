@@ -1,5 +1,17 @@
 """连续对话研究助手（基于 deepagents 的 Deep Agent）。
 
+搜索后端支持两种模式，由环境变量 USE_TAVILY_MCP 切换（默认 0 = SDK 模式）：
+    * SDK 模式  —— 直接调用 tavily-python，带 lru_cache 缓存，零额外依赖
+    * MCP 模式  —— 通过 langchain-mcp-adapters 连接 Tavily 远程 MCP 服务器
+                   （https://mcp.tavily.com/mcp/），工具由 MCP 提供，无本地缓存。
+                   MCP 工具按轻重分级：tavily_search 给轻量子代理，
+                   crawl/map/research 等重工具仅给研究子代理。
+                   MCP 不可用或无工具时自动回退 SDK，保证 Agent 始终可用。
+
+切换方式：
+    python agents/agent-v2.py              # SDK 模式（默认，带缓存）
+    USE_TAVILY_MCP=1 python agents/agent-v2.py   # MCP 模式
+
 模块结构：
     1. 配置与常量        —— 环境变量、模型参数、时区等集中管理
     2. 工具定义          —— 供 Agent 调用的外部能力（网络搜索）
@@ -12,6 +24,8 @@
 
 import os
 import re
+import json
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -19,7 +33,9 @@ from typing import Literal
 from functools import lru_cache
 import time
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 from tavily import TavilyClient
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
@@ -41,9 +57,9 @@ class Settings:
     """集中管理运行时配置，便于统一调整与测试。"""
 
     # 模型
-    base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL"))
-    api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "empty"))
-    model_name: str = field(default_factory=lambda: os.getenv("MODEL_NAME"))
+    base_url: str = field(default_factory=lambda: os.getenv("QWEN3.8_BASE_URL"))
+    api_key: str = field(default_factory=lambda: os.getenv("QWEN3.8_API_KEY", "empty"))
+    model_name: str = field(default_factory=lambda: os.getenv("QWEN3.8_MODEL_NAME"))
     temperature: float = 0.7
     max_tokens: int = 16384
     streaming: bool = False  # 开启流式，降低首字延迟、提升体感速度
@@ -56,6 +72,11 @@ class Settings:
 
     # 工具
     tavily_api_key: str = field(default_factory=lambda: os.environ["TAVILY_API_KEY"])
+    # 搜索后端开关：True = 走 Tavily 远程 MCP；False = 走 tavily-python SDK（带缓存）
+    use_mcp: bool = field(
+        default_factory=lambda: os.getenv("USE_TAVILY_MCP", "0").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
 
     # Agent 运行
     recursion_limit: int = 20  # 复杂任务（委派子代理 + 搜索 + 保存文件）需要更多步数
@@ -81,18 +102,198 @@ def _cached_tavily_search(
     )
 
 
+class InternetSearchInput(BaseModel):
+    """深度检索入参：面向调研、多来源对比与报告撰写。"""
+
+    query: str = Field(
+        ...,
+        description="完整且具体的检索问题，须包含主题与限定条件，不要只给关键词。"
+                    "示例：'2026 年 LangChain 1.0 相比 0.3 有哪些破坏性变更'",
+    )
+    max_results: int = Field(
+        default=3, ge=1, le=10,
+        description="返回来源条数（1-10）。多方对比或撰写报告用 3-5。"
+                    "若只需确认一条事实，说明这不是本工具的场景，应改用 quick_fact_check。",
+    )
+    topic: Literal["general", "news", "finance"] = Field(
+        default="general",
+        description="检索领域。general=通用；news=有时效性的新闻事件；"
+                    "finance=公司、财报、行情等财经信息。",
+    )
+    include_raw_content: bool = Field(
+        default=False,
+        description="是否附带网页正文全文。会大幅增加 token 消耗，"
+                    "仅在需要逐字引用原文时才开启；只要摘要请保持 False。",
+    )
+
+
+class QuickFactCheckInput(BaseModel):
+    """快速事实核查入参：只需一个权威来源即可确认的单条事实。"""
+
+    query: str = Field(
+        ...,
+        description="可一句话回答的事实性短问题，例如 'Python 3.12 发布于哪一年'。"
+                    "不要用于开放式调研、多方案对比或报告撰写——那些属于 internet_search 的场景。",
+    )
+    max_results: int = Field(
+        default=1, ge=1, le=3,
+        description="来源条数（1-3，默认 1）。本工具只做单点核实；"
+                    "若需要 3 条以上来源交叉对比，说明不是事实核查场景，应改用 internet_search。",
+    )
+
+
+@tool("internet_search", args_schema=InternetSearchInput)
 def internet_search(
     query: str,
     max_results: int = 3,
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = False,
-):
-    """运行网络搜索，返回 Tavily 检索结果（带缓存）。"""
+) -> dict:
+    """深度网络检索：多来源、可按领域（新闻/财经）筛选、可获取网页原文。
+
+    适用场景：
+      - 需要综合多个来源才能回答的开放式问题
+      - 需要按领域筛选，或需要引用网页原文细节
+      - 用户明确要求调研、对比、整理资料或输出报告
+
+    不适用，请改用 quick_fact_check：
+      - 只需确认一个日期、版本号、定义、人名等单条事实
+      - 闲聊中顺带追问的小问题
+
+    返回 Tavily 检索结果（带缓存）。
+    """
     return _cached_tavily_search(query, max_results, topic, include_raw_content)
 
-def simple_search(query: str, max_results: int = 1):
-    """运行简单搜索，返回 Tavily 检索结果（带缓存）。"""
+
+@tool("quick_fact_check", args_schema=QuickFactCheckInput)
+def quick_fact_check(query: str, max_results: int = 1) -> dict:
+    """快速事实核查：单来源、轻量，用于确认一条可一句话回答的事实。
+
+    适用场景：
+      - 确认一个具体日期、版本号、定义、人名或"是否成立"
+      - 闲聊中需要联网核实的单条信息
+
+    不适用，请改用 internet_search：
+      - 需要多个来源对比、趋势梳理或撰写报告
+      - 需要新闻/财经领域筛选，或需要网页原文
+
+    返回 Tavily 检索结果（带缓存），最多 3 条来源。
+    """
     return _cached_tavily_search(query, max_results, "general", False)
+
+
+# ==================== 2b. MCP 工具（可选后端） ====================
+SDK_BACKEND = "SDK（tavily-python，带缓存）"
+
+
+def load_mcp_tools() -> list:
+    """通过 MCP 协议加载 Tavily 远程服务器的工具。
+
+    连接 Tavily 官方远程 MCP（Streamable HTTP），返回 LangChain 工具列表
+    （当前服务端提供 tavily_search / tavily_extract / tavily_crawl /
+    tavily_map / tavily_research）。工具在客户端被转换，因此不要求模型服务端
+    支持 MCP——只要支持普通 function calling 即可。
+
+    注意：MCP 路径无本地缓存，每次调用都是真实网络往返。
+
+    Returns:
+        LangChain 工具列表；连接失败时打印告警并返回空列表（由调用方回退 SDK）。
+    """
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+
+    client = MultiServerMCPClient({
+        "tavily": {
+            "transport": "streamable_http",
+            "url": f"https://mcp.tavily.com/mcp/?tavilyApiKey={SETTINGS.tavily_api_key}",
+            "headers": {
+                # 透传给 Tavily API 的默认参数，避免每次调用重复指定
+                "DEFAULT_PARAMETERS": json.dumps({
+                    "include_raw_content": False,
+                    "include_images": False,
+                }),
+            },
+        }
+    })
+    # get_tools() 为异步接口，此处在启动时一次性拉取，之后同步复用
+    tools = asyncio.run(client.get_tools())
+    print(f"🔌 MCP 已连接 Tavily，加载工具: {[t.name for t in tools]}")
+    return tools  # 原始（仅异步）工具，由 resolve_search_tools 包装并注入场景约束
+
+
+# MCP 中较重的工具（爬取/站点地图/深度研究），只交给研究子代理
+HEAVY_MCP_TOOLS = {"tavily_crawl", "tavily_map", "tavily_research"}
+LIGHT_MCP_TOOLS = {"tavily_search"}
+
+# MCP 工具同名同描述，两个子代理拿到完全一样的工具会失去区分度，
+# 故在描述前注入场景前缀，等价于 SDK 模式下两个工具的语义分工。
+MCP_RESEARCH_HINT = (
+    "【调研场景】你服务于深度调研子代理：可综合多来源、可按领域检索、可读取网页正文，"
+    "用于对比分析、趋势梳理与报告撰写。"
+)
+MCP_QUICK_HINT = (
+    "【事实核查场景】你服务于轻量核查子代理：只做单点核实，一次调用即给出简短答案，"
+    "不要展开多轮检索，不要使用 crawl/research 等重工具；"
+    "若问题需要多来源对比或写报告，说明它不在本场景内。"
+)
+
+
+def _to_sync_tool(tool, scope_hint: str = ""):
+    """把仅支持异步的 MCP 工具包装为同步可调用，并可注入场景约束。
+
+    langchain-mcp-adapters 产出的 StructuredTool 只有 coroutine，
+    同步 invoke 会抛 NotImplementedError。CLI 走的是同步 stream()，
+    故此处用 asyncio.run 桥接，同时保留 coroutine 以兼容异步调用。
+
+    Args:
+        tool: MCP 原始工具。
+        scope_hint: 追加到描述前的场景约束文本。
+    """
+    from langchain_core.tools import StructuredTool
+
+    def _sync(**kwargs):
+        return asyncio.run(tool.ainvoke(kwargs))
+
+    desc = tool.description or tool.name
+    return StructuredTool(
+        name=tool.name,
+        description=f"{scope_hint}\n\n{desc}" if scope_hint else desc,
+        args_schema=tool.args_schema,
+        func=_sync,
+        coroutine=tool.coroutine,
+    )
+
+
+def resolve_search_tools() -> tuple[list, list, str]:
+    """按 USE_TAVILY_MCP 决定搜索后端，返回 (研究工具, 简单工具, 模式名)。
+
+    MCP 不可用时自动回退到 SDK 工具，保证 Agent 始终可用。
+    """
+    if not SETTINGS.use_mcp:
+        return [internet_search], [quick_fact_check], "SDK（tavily-python，带缓存）"
+    try:
+        mcp_tools = load_mcp_tools()
+    except Exception as e:
+        print(f"⚠️ MCP 连接失败，回退 SDK 模式: {type(e).__name__}: {e}")
+        return [internet_search], [quick_fact_check], "SDK（回退，MCP 不可用）"
+    if not mcp_tools:
+        print("⚠️ MCP 未返回任何工具，回退 SDK 模式")
+        return [internet_search], [quick_fact_check], "SDK（回退，MCP 无工具）"
+
+    # MCP 工具在同一子代理内无法靠名字区分，故用描述前缀注入场景约束
+    research = [_to_sync_tool(t, MCP_RESEARCH_HINT) for t in mcp_tools]
+    # 轻量子代理只用搜索类工具，避免误触爬取/深度研究等重操作
+    light = [
+        _to_sync_tool(t, MCP_QUICK_HINT)
+        for t in mcp_tools if getattr(t, "name", "") in LIGHT_MCP_TOOLS
+    ]
+    if not light:  # 名称约定变化时至少保证有工具可用
+        light = [
+            _to_sync_tool(t, MCP_QUICK_HINT)
+            for t in mcp_tools if getattr(t, "name", "") not in HEAVY_MCP_TOOLS
+        ] or research
+    # 未识别到的新工具（不在两个集合中）默认交给研究子代理
+    return research, light, f"MCP（Tavily 远程，共 {len(mcp_tools)} 个工具）"
+
 
 DEFAULT_REPORT_DIR = os.path.join(PROJECT_ROOT, "reports")
 
@@ -126,13 +327,16 @@ REPORT_PROMPT = """您是一位专家级研究员和技术写作专家，我们�
 
 ## 核心规则（必须严格遵守，违反即失败）
 1. **禁止使用 write_todos 或任何任务计划工具**。不要规划，直接行动。
-2. **整个回答过程最多调用 2 次搜索工具**。收到结果后立即撰写最终回答，严禁追加搜索。
+2. **整个回答过程最多调用 2 次 internet_search**。收到结果后立即撰写最终回答，严禁追加搜索。
 3. **所有搜索必须在同一轮中并行发起**（一次发多个 tool_calls），绝对不要分多轮逐个搜索。
-4. 搜索结果只提取摘要，不要请求原始内容。
+4. 检索用 internet_search（支持 topic 领域筛选、max_results 条数、include_raw_content 原文）。
+   搜索结果只提取摘要，不要请求原始内容。
 
 ## 路由策略
 - 纯闲聊、寒暄，或基于常识就能回答的问题：不要委派子代理，直接简洁回答。
-- 仅当问题需要最新信息或深入调研时，才委派 research-agent 子代理。
+- 需要最新信息时，用下面这条判据二选一，不要凭"问题看起来难不难"判断：
+  * 答案只需一个来源即可确认（单个日期、版本号、定义、是否成立）→ 委派 simple-search
+  * 答案需要多个来源交叉验证（对比、趋势、技术细节、写报告）→ 委派 research-agent
 
 ## 回复格式要求
 - **普通提问**：请用清晰、结构化的文字直接回答，不要强行套用报告格式。
@@ -150,10 +354,19 @@ MAIN_PROMPT = """您是一位高效的研究助手，负责协调子代理完成
 2. 调用 save_report_to_md 保存文件后，直接报告结果给用户，**严禁**再调用 ls/glob 等文件工具去「验证」文件是否存在。
 3. **禁止调用 execute 执行 shell 命令**。
 
-## 路由策略
+## 路由策略（按顺序判断，避免误委派）
 - 纯闲聊或常识问题：直接回答，不委派子代理。
-- 需要搜索和研究的问题：委派 research-agent。
-- 用户要求保存文件：调用 save_report_to_md 即可。
+- 用户要求保存文件：调用 save_report_to_md 即可，不要再调用文件工具去"验证"。
+- 需要联网才能回答时，用"答案是否需要多个来源交叉验证"来分流：
+  * 只需确认单条事实（一个日期/版本号/定义/是否成立）→ 委派 simple-search
+  * 需要多来源对比、趋势梳理、技术考证或写报告 → 委派 research-agent
+- 两者拿不准时，按"是否需要交叉验证"决定，不要两个都派。
+
+## 委派约束（防循环，必须遵守）
+- **每个问题最多委派 2 次子代理**。子代理返回后，无论结果是否完整，
+  都必须基于已有信息给用户作答，严禁再次委派。
+- 子代理回复"未能核实"时，直接如实转告用户即可，**不要换个子代理重新试一遍**。
+- 用户没要求重试时，不要因为答案不够完美就重复委派。
 
 ## 效率要求
 - 尽量减少工具调用轮数。能用一轮解决就不要分多轮。
@@ -163,8 +376,11 @@ SIMPLE_PROMPT = """您是一位友好的对话助手，负责处理简单问答�
 
 ## 策略
 - 大多数简单问题可直接回答，无需搜索，更不要委派其它子代理。
-- 仅当问题涉及需要联网核实的最新事实时，才使用 simple_search 进行一次轻量搜索。
-- 不要对同一问题反复搜索。
+- 仅当问题涉及需要联网核实的最新事实时，才使用 quick_fact_check 进行轻量核查。
+- **硬上限：最多调用 2 次 quick_fact_check**。收到结果后立即作答，
+  严禁因为"没找到确切答案"就换措辞反复搜索（这属于深度调研，不是事实核查）。
+- 两次都没查到，就直接说明未能核实，并给出你所知道的信息，不要继续搜。
+- 若问题实则需要多来源对比或展开调研，说明它不属于本子代理，简短作答即可。
 - 回答保持简洁、口语化，不要套用报告格式。
 """
 
@@ -211,6 +427,7 @@ class ResearchAgent:
         self.settings = settings
         self.memory = MemorySaver()
         self.store = InMemoryStore()
+        self.search_backend = SDK_BACKEND  # 由 _build_agent 更新为实际生效的后端
         self.agent = self._build_agent()
 
     def _build_llm(self) -> ChatOpenAI:
@@ -229,18 +446,27 @@ class ResearchAgent:
         return ChatOpenAI(**kwargs)
 
     def _build_agent(self):
+        research_tools, simple_tools, self.search_backend = resolve_search_tools()
         research_subagent = {
             "name": "research-agent",
-            "description": "用于研究更深入的问题",
+            "description": (
+                "【委派条件】需要综合多个来源才能回答的调研类问题：横向对比、趋势梳理、"
+                "技术细节考证，或用户明确要求调研/整理/撰写报告。\n"
+                "【不要委派】只需确认单条事实（一个日期、版本号、定义）的问题，以及纯闲聊寒暄。"
+            ),
             "system_prompt": REPORT_PROMPT,
-            "tools": [internet_search],
+            "tools": research_tools,
             # "model": "openai:gpt-4o",  # 可选覆盖，默认为主 Agent 模型
         }
         simple_search_subagent = {
             "name": "simple-search",
-            "description": "用于简单回答或闲聊",
+            "description": (
+                "【委派条件】只需一个简短答案的场景：确认单条事实（日期、版本号、定义、"
+                "某人某事是否成立），或闲聊中顺带需要联网核实一点信息。\n"
+                "【不要委派】需要多来源对比、趋势分析、深度调研或写报告的问题——那些应派给 research-agent。"
+            ),
             "system_prompt": SIMPLE_PROMPT,
-            "tools": [simple_search],
+            "tools": simple_tools,
         }
         return create_deep_agent(
             model=self._build_llm(),
@@ -363,18 +589,19 @@ class ResearchAgent:
 
 
 # ==================== 7. CLI 主流程 ====================
-def _print_banner() -> None:
+def _print_banner(backend: str) -> None:
     print("=" * 60)
     print("🤖 研究助手（Deep Agent）已就绪，支持连续对话与上下文记忆！")
+    print(f"🔎 搜索后端: {backend}")
+    print(f"   切换方式: USE_TAVILY_MCP=1 python agents/agent-v2.py")
     print("💡 输入您的问题开始研究，输入 'exit' 或 'quit' 退出。")
     print("=" * 60)
 
 
 def run_cli() -> None:
     """启动交互式连续对话。"""
-    _print_banner()
-
     agent = ResearchAgent()
+    _print_banner(agent.search_backend)
     logger = ConversationLogger()
     session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
